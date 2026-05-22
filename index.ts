@@ -1,9 +1,7 @@
-import 'react-native-gesture-handler';
-import { registerRootComponent } from 'expo';
+import "react-native-gesture-handler";
+import { registerRootComponent } from "expo";
 
-import App from './App';
+// OAuth 디버그 전용 — Users 생성 확인 후 App 으로 되돌리세요
+import OAuthDebugApp from "./OAuthDebugApp";
 
-// registerRootComponent calls AppRegistry.registerComponent('main', () => App);
-// It also ensures that whether you load the app in Expo Go or in a native build,
-// the environment is set up appropriately
-registerRootComponent(App);
+registerRootComponent(OAuthDebugApp);
