@@ -14,8 +14,9 @@ import {
   ActivityIndicator,
   type AppStateStatus,
 } from "react-native";
+import * as Linking from "expo-linking";
 import { supabase } from "./lib/supabase";
-import { signOutSupabase } from "./lib/auth-expo-go";
+import { signOut, completeOAuthFromUrl, isOAuthCallbackUrl } from "./lib/auth";
 import LoginScreen from "./components/LoginScreen";
 import {
   ensureProfileRow,
@@ -776,6 +777,39 @@ export default function App() {
     await resolveSession(session?.user?.id ?? null);
   }, [resolveSession]);
 
+  const processOAuthUrl = useCallback(
+    async (url: string) => {
+      if (!isOAuthCallbackUrl(url)) return;
+      console.log("[App] processOAuthUrl:", url);
+      setAuthBusy(true);
+      setAuthErr(null);
+      try {
+        const handled = await completeOAuthFromUrl(url);
+        if (!handled) return;
+        await handleLoggedIn();
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "OAuth 콜백 처리 실패";
+        console.warn("[App] processOAuthUrl failed:", msg);
+        setAuthErr(msg);
+        setBoot("login");
+      } finally {
+        setAuthBusy(false);
+      }
+    },
+    [handleLoggedIn],
+  );
+
+  useEffect(() => {
+    const onLink = ({ url }: { url: string }) => {
+      processOAuthUrl(url);
+    };
+    const sub = Linking.addEventListener("url", onLink);
+    Linking.getInitialURL().then((url) => {
+      if (url) processOAuthUrl(url);
+    });
+    return () => sub.remove();
+  }, [processOAuthUrl]);
+
   useEffect(() => {
     if (boot !== "ready") return;
     loadCompletedMap().then((local) => {
@@ -786,7 +820,7 @@ export default function App() {
   const handleLogout = async () => {
     setAuthBusy(true);
     try {
-      await signOutSupabase();
+      await signOut();
       setScreen("menu");
       await resolveSession(null);
     } catch (e) {
