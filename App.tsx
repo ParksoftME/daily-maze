@@ -700,6 +700,29 @@ export default function App() {
     setStreak(await fetchStreak(uid));
   }, []);
 
+  const continueAfterLogin = useCallback(async () => {
+    if (!userId) return;
+    setAuthBusy(true);
+    setAuthErr(null);
+    try {
+      const row = await ensureProfileRow(userId);
+      if (!row.nickname?.trim()) {
+        setProfile(row);
+        setNicknameDraft("");
+        setBoot("nickname");
+        return;
+      }
+      setProfile(row);
+      await hydrateFromCloud(userId);
+      setBoot("ready");
+    } catch (e) {
+      setAuthErr(e instanceof Error ? e.message : "프로필을 불러오지 못했어요.");
+      setBoot("login");
+    } finally {
+      setAuthBusy(false);
+    }
+  }, [userId, hydrateFromCloud]);
+
   const resolveSession = useCallback(
     async (uid: string | null) => {
       if (!uid) {
@@ -709,20 +732,42 @@ export default function App() {
         setBoot("login");
         return;
       }
-      setUserId(uid);
-      setAuthErr(null);
-      const { data: { user } } = await supabase.auth.getUser();
-      setUserEmail(user?.email ?? null);
-      const row = await ensureProfileRow(uid);
-      if (!row.nickname?.trim()) {
+      try {
+        setAuthErr(null);
+        const { data: { session }, error: sessErr } = await supabase.auth.getSession();
+        if (sessErr) throw sessErr;
+        if (!session?.user) throw new Error("세션이 없습니다.");
+
+        setUserId(session.user.id);
+        setUserEmail(session.user.email ?? null);
+
+        const row = await ensureProfileRow(uid);
+        if (!row.nickname?.trim()) {
+          setProfile(row);
+          setNicknameDraft("");
+          setBoot("nickname");
+          return;
+        }
         setProfile(row);
-        setNicknameDraft("");
-        setBoot("nickname");
-        return;
+        await hydrateFromCloud(uid);
+        setBoot("ready");
+      } catch (e) {
+        console.warn("[Auth] resolveSession failed:", e);
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.user) {
+          setUserId(session.user.id);
+          setUserEmail(session.user.email ?? null);
+          setBoot("login");
+          setAuthErr(
+            e instanceof Error ? e.message : "프로필 연동에 실패했어요. 계속하기를 눌러 다시 시도하세요.",
+          );
+        } else {
+          setUserId(null);
+          setUserEmail(null);
+          setBoot("login");
+          setAuthErr(e instanceof Error ? e.message : "세션 확인에 실패했어요.");
+        }
       }
-      setProfile(row);
-      await hydrateFromCloud(uid);
-      setBoot("ready");
     },
     [hydrateFromCloud],
   );
@@ -734,26 +779,53 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      authBootRef.current = true;
-      resolveSession(session?.user?.id ?? null);
-    });
+    (async () => {
+      try {
+        const { data: { session }, error } = await supabase.auth.getSession();
+        if (error) throw error;
+        authBootRef.current = true;
+        await resolveSession(session?.user?.id ?? null);
+      } catch (e) {
+        authBootRef.current = true;
+        setAuthErr(e instanceof Error ? e.message : "앱 초기화에 실패했어요.");
+        setBoot("login");
+      }
+    })();
+
     const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
       if (!authBootRef.current && event === "INITIAL_SESSION") return;
       if (event === "TOKEN_REFRESHED") return;
       if (event === "SIGNED_IN" || event === "SIGNED_OUT" || event === "USER_UPDATED") {
-        resolveSession(session?.user?.id ?? null);
+        resolveSession(session?.user?.id ?? null).catch((e) => {
+          setAuthErr(e instanceof Error ? e.message : "세션 갱신에 실패했어요.");
+          setBoot("login");
+        });
       }
     });
     return () => sub.subscription.unsubscribe();
   }, [resolveSession]);
 
+  const oauthHandledByBrowserRef = useRef(false);
+
   useEffect(() => {
     const onUrl = async ({ url }: { url: string }) => {
+      if (oauthHandledByBrowserRef.current) {
+        oauthHandledByBrowserRef.current = false;
+        return;
+      }
       try {
-        await handleOAuthRedirectUrl(url);
-      } catch {
-        /* openAuthSessionAsync가 처리한 경우 무시 */
+        const handled = await handleOAuthRedirectUrl(url);
+        if (!handled) return;
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.user) {
+          setUserId(session.user.id);
+          setUserEmail(session.user.email ?? null);
+          setBoot("login");
+          setAuthErr(null);
+        }
+      } catch (e) {
+        setAuthErr(e instanceof Error ? e.message : "OAuth 콜백 처리에 실패했어요.");
+        setBoot("login");
       }
     };
     const sub = Linking.addEventListener("url", onUrl);
@@ -773,13 +845,22 @@ export default function App() {
   const handleGoogleLogin = async () => {
     setAuthBusy(true);
     setAuthErr(null);
+    oauthHandledByBrowserRef.current = true;
     try {
-      const { cancelled } = await signInWithGoogle();
-      if (cancelled) return;
-      const { data: { session } } = await supabase.auth.getSession();
-      await resolveSession(session?.user?.id ?? null);
+      const result = await signInWithGoogle();
+      if (!result.ok) {
+        if (result.cancelled) return;
+        setAuthErr(result.error ?? "로그인에 실패했어요.");
+        setBoot("login");
+        return;
+      }
+      setUserId(result.userId);
+      setUserEmail(result.email);
+      setBoot("login");
+      setAuthErr(null);
     } catch (e) {
       setAuthErr(e instanceof Error ? e.message : "로그인에 실패했어요.");
+      setBoot("login");
     } finally {
       setAuthBusy(false);
     }
@@ -1172,8 +1253,20 @@ export default function App() {
         <Text style={S.title}>🗺️ 데일리 미로</Text>
         {userId && userEmail ? (
           <>
-            <Text style={{ color: "#666", textAlign: "center" }}>로그인됨</Text>
+            <Text style={{ color: "#2e7d32", textAlign: "center", fontWeight: "800" }}>
+              로그인 성공
+            </Text>
             <Text style={S.authEmail}>{userEmail}</Text>
+            <TouchableOpacity
+              style={S.startBtn}
+              disabled={authBusy}
+              onPress={continueAfterLogin}>
+              {authBusy ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={{ color: "#fff", fontSize: 18, fontWeight: "800" }}>게임 시작</Text>
+              )}
+            </TouchableOpacity>
             <TouchableOpacity
               style={S.signOutBtnPrimary}
               disabled={authBusy}
