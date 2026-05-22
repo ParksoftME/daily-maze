@@ -14,14 +14,9 @@ import {
   ActivityIndicator,
   type AppStateStatus,
 } from "react-native";
-import * as Linking from "expo-linking";
-import {
-  signInWithGoogle,
-  signOut,
-  handleOAuthRedirectUrl,
-  getOAuthRedirectUri,
-} from "./lib/auth";
 import { supabase } from "./lib/supabase";
+import { signOutSupabase } from "./lib/auth-expo-go";
+import LoginScreen from "./components/LoginScreen";
 import {
   ensureProfileRow,
   fetchStreak,
@@ -700,29 +695,6 @@ export default function App() {
     setStreak(await fetchStreak(uid));
   }, []);
 
-  const continueAfterLogin = useCallback(async () => {
-    if (!userId) return;
-    setAuthBusy(true);
-    setAuthErr(null);
-    try {
-      const row = await ensureProfileRow(userId);
-      if (!row.nickname?.trim()) {
-        setProfile(row);
-        setNicknameDraft("");
-        setBoot("nickname");
-        return;
-      }
-      setProfile(row);
-      await hydrateFromCloud(userId);
-      setBoot("ready");
-    } catch (e) {
-      setAuthErr(e instanceof Error ? e.message : "프로필을 불러오지 못했어요.");
-      setBoot("login");
-    } finally {
-      setAuthBusy(false);
-    }
-  }, [userId, hydrateFromCloud]);
-
   const resolveSession = useCallback(
     async (uid: string | null) => {
       if (!uid) {
@@ -758,9 +730,7 @@ export default function App() {
           setUserId(session.user.id);
           setUserEmail(session.user.email ?? null);
           setBoot("login");
-          setAuthErr(
-            e instanceof Error ? e.message : "프로필 연동에 실패했어요. 계속하기를 눌러 다시 시도하세요.",
-          );
+          setAuthErr(e instanceof Error ? e.message : "프로필 연동에 실패했어요.");
         } else {
           setUserId(null);
           setUserEmail(null);
@@ -773,10 +743,6 @@ export default function App() {
   );
 
   const authBootRef = useRef(false);
-
-  useEffect(() => {
-    getOAuthRedirectUri();
-  }, []);
 
   useEffect(() => {
     (async () => {
@@ -805,35 +771,10 @@ export default function App() {
     return () => sub.subscription.unsubscribe();
   }, [resolveSession]);
 
-  const oauthHandledByBrowserRef = useRef(false);
-
-  useEffect(() => {
-    const onUrl = async ({ url }: { url: string }) => {
-      if (oauthHandledByBrowserRef.current) {
-        oauthHandledByBrowserRef.current = false;
-        return;
-      }
-      try {
-        const handled = await handleOAuthRedirectUrl(url);
-        if (!handled) return;
-        const { data: { session } } = await supabase.auth.getSession();
-        if (session?.user) {
-          setUserId(session.user.id);
-          setUserEmail(session.user.email ?? null);
-          setBoot("login");
-          setAuthErr(null);
-        }
-      } catch (e) {
-        setAuthErr(e instanceof Error ? e.message : "OAuth 콜백 처리에 실패했어요.");
-        setBoot("login");
-      }
-    };
-    const sub = Linking.addEventListener("url", onUrl);
-    Linking.getInitialURL().then((url) => {
-      if (url) onUrl({ url });
-    });
-    return () => sub.remove();
-  }, []);
+  const handleLoggedIn = useCallback(async () => {
+    const { data: { session } } = await supabase.auth.getSession();
+    await resolveSession(session?.user?.id ?? null);
+  }, [resolveSession]);
 
   useEffect(() => {
     if (boot !== "ready") return;
@@ -842,34 +783,10 @@ export default function App() {
     });
   }, [boot]);
 
-  const handleGoogleLogin = async () => {
-    setAuthBusy(true);
-    setAuthErr(null);
-    oauthHandledByBrowserRef.current = true;
-    try {
-      const result = await signInWithGoogle();
-      if (!result.ok) {
-        if (result.cancelled) return;
-        setAuthErr(result.error ?? "로그인에 실패했어요.");
-        setBoot("login");
-        return;
-      }
-      setUserId(result.userId);
-      setUserEmail(result.email);
-      setBoot("login");
-      setAuthErr(null);
-    } catch (e) {
-      setAuthErr(e instanceof Error ? e.message : "로그인에 실패했어요.");
-      setBoot("login");
-    } finally {
-      setAuthBusy(false);
-    }
-  };
-
   const handleLogout = async () => {
     setAuthBusy(true);
     try {
-      await signOut();
+      await signOutSupabase();
       setScreen("menu");
       await resolveSession(null);
     } catch (e) {
@@ -1248,54 +1165,15 @@ export default function App() {
 
   if (boot === "login") {
     return (
-      <View style={[S.root, { justifyContent: "center", gap: 20 }]}>
+      <View style={S.menuRoot}>
         <StatusBar barStyle="dark-content" />
-        <Text style={S.title}>🗺️ 데일리 미로</Text>
-        {userId && userEmail ? (
-          <>
-            <Text style={{ color: "#2e7d32", textAlign: "center", fontWeight: "800" }}>
-              로그인 성공
-            </Text>
-            <Text style={S.authEmail}>{userEmail}</Text>
-            <TouchableOpacity
-              style={S.startBtn}
-              disabled={authBusy}
-              onPress={continueAfterLogin}>
-              {authBusy ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
-                <Text style={{ color: "#fff", fontSize: 18, fontWeight: "800" }}>게임 시작</Text>
-              )}
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={S.signOutBtnPrimary}
-              disabled={authBusy}
-              onPress={handleLogout}>
-              {authBusy ? (
-                <ActivityIndicator color="#333" />
-              ) : (
-                <Text style={S.signOutBtnPrimaryTxt}>로그아웃</Text>
-              )}
-            </TouchableOpacity>
-          </>
-        ) : (
-          <>
-            <Text style={{ color: "#666", textAlign: "center", lineHeight: 22 }}>
-              구글 계정으로 로그인하고{"\n"}오늘의 미로 기록을 저장하세요.
-            </Text>
-            <TouchableOpacity
-              style={S.googleBtn}
-              disabled={authBusy}
-              onPress={handleGoogleLogin}>
-              {authBusy ? (
-                <ActivityIndicator color="#333" />
-              ) : (
-                <Text style={S.googleBtnTxt}>Google로 로그인</Text>
-              )}
-            </TouchableOpacity>
-          </>
-        )}
-        {authErr != null && <Text style={S.authErr}>{authErr}</Text>}
+        <LoginScreen
+          busy={authBusy}
+          error={authErr}
+          onBusyChange={setAuthBusy}
+          onError={setAuthErr}
+          onLoggedIn={handleLoggedIn}
+        />
       </View>
     );
   }
